@@ -1,8 +1,5 @@
 package proxy
 
-// firewall.go — nftables 规则生成 + ip rule/route 管理
-// 逻辑与 Singa firewall/nft.go 保持一致。
-
 import (
 	"fmt"
 	"log"
@@ -18,13 +15,10 @@ const (
 	tproxyTable  = 100
 	nftTableName = "tproxy_core"
 
-	// FakeIP 地址段（与 Singa / sing-box 默认值一致）
 	fakeIPv4Range = "198.18.0.0/15"
 	fakeIPv6Range = "fc00::/18"
 )
 
-// privateRangesV4 返回 IPv4 私有/保留段的 nft bypass 规则。
-// fakeip=true 时豁免 198.18.0.0/15，让 fakeip 流量能到达代理。
 func privateRangesV4(fakeip bool) string {
 	if fakeip {
 		return "" +
@@ -41,8 +35,6 @@ func privateRangesV4(fakeip bool) string {
 		"192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/3 } return\n"
 }
 
-// privateRangesV6 返回 IPv6 私有/保留段的 nft bypass 规则。
-// fakeip=true 时豁免 fc00::/18。
 func privateRangesV6(fakeip bool) string {
 	if fakeip {
 		return "        ip6 daddr != " + fakeIPv6Range + " ip6 daddr { ::/127, fc00::/7, fe80::/10, ff00::/8 } return\n"
@@ -50,25 +42,19 @@ func privateRangesV6(fakeip bool) string {
 	return "        ip6 daddr { ::/127, fc00::/7, fe80::/10, ff00::/8 } return\n"
 }
 
-// buildNFTConf 生成完整的 nft 配置文本。
-//
-//   cfg.DNSPort    — 代理 DNS 监听端口（0 = 不做 DNS 劫持）
-//   cfg.TProxyPort — tproxy 入站端口
-//   cfg.IPv6       — 是否生成 IPv6 规则
-//   cfg.FakeIP     — 是否开启 FakeIP 豁免
-//   gid            — 代理进程的 GID（此 GID 的流量跳过所有重定向）
+// buildNFTConf 生成完整 nft 配置，与 Singa buildTable/buildManglePrerouting 逻辑一致。
 func buildNFTConf(cfg Config, gid uint32) string {
 	var s strings.Builder
 
 	s.WriteString(fmt.Sprintf("table inet %s {\n", nftTableName))
 
-	// ── 本机地址集合 ────────────────────────────────────────────────────────
+	// ── 本机地址集合 ──────────────────────────────────────────────────────
 	s.WriteString("    set interface {\n        type ipv4_addr\n        flags interval\n        auto-merge\n    }\n")
 	if cfg.IPv6 {
 		s.WriteString("    set interface6 {\n        type ipv6_addr\n        flags interval\n        auto-merge\n    }\n")
 	}
 
-	// ── tp_mark 链：给新连接打 fwmark ────────────────────────────────────
+	// ── tp_mark 链 ────────────────────────────────────────────────────────
 	s.WriteString(fmt.Sprintf(`
     chain tp_mark {
         tcp flags syn / fin,syn,rst,ack meta mark set meta mark | %s
@@ -78,7 +64,7 @@ func buildNFTConf(cfg Config, gid uint32) string {
 
 `, tproxyMark, tproxyMark))
 
-	// ── proxy_rule 链：决定是否打 mark ───────────────────────────────────
+	// ── proxy_rule 链：决策是否打 mark ───────────────────────────────────
 	s.WriteString("    chain proxy_rule {\n")
 	s.WriteString("        meta mark set ct mark\n")
 	s.WriteString(fmt.Sprintf("        meta mark & %s == %s return\n", tproxyMask, tproxyMark))
@@ -90,7 +76,6 @@ func buildNFTConf(cfg Config, gid uint32) string {
 	if cfg.IPv6 {
 		s.WriteString("        ip6 daddr @interface6 return\n")
 	}
-	// 如果开了 DNS 劫持，跳过代理自己的 DNS 端口（防环路）
 	if cfg.DNSPort > 0 {
 		s.WriteString(fmt.Sprintf("        meta l4proto { tcp, udp } th dport %d return\n", cfg.DNSPort))
 	}
@@ -98,9 +83,23 @@ func buildNFTConf(cfg Config, gid uint32) string {
 	s.WriteString("        meta l4proto udp jump tp_mark\n")
 	s.WriteString("    }\n\n")
 
-	// ── proxy_pre 链：prerouting mangle，执行 tproxy redirect ───────────
+	// ── proxy_pre 链：prerouting mangle ──────────────────────────────────
+	// 与 Singa buildManglePrerouting 一致：
+	//   lanProxy=true  → 先拦截转发流量（src!=local AND dst!=local），再做 tproxy redirect
+	//   lanProxy=false → 只处理已由 proxy_out 打好 mark 的本机流量
 	s.WriteString("    chain proxy_pre {\n")
 	s.WriteString(fmt.Sprintf("        iifname \"lo\" meta mark & %s != %s return\n", tproxyMask, tproxyMark))
+
+	if cfg.LAN {
+		// 转发流量（来自局域网其他设备）：src 不是本机，dst 不是本机
+		if cfg.IPv6 {
+			s.WriteString("        meta nfproto { ipv4, ipv6 } meta l4proto { tcp, udp } fib saddr type != local fib daddr type != local jump proxy_rule\n")
+		} else {
+			s.WriteString("        meta nfproto ipv4 meta l4proto { tcp, udp } fib saddr type != local fib daddr type != local jump proxy_rule\n")
+		}
+	}
+
+	// tproxy redirect：把已打 mark 的包送到代理入站端口
 	s.WriteString(fmt.Sprintf(
 		"        meta nfproto ipv4 meta l4proto { tcp, udp } meta mark & %s == %s tproxy ip to 127.0.0.1:%d\n",
 		tproxyMask, tproxyMark, cfg.TProxyPort))
@@ -123,7 +122,7 @@ func buildNFTConf(cfg Config, gid uint32) string {
 		nfproto))
 	s.WriteString("    }\n\n")
 
-	// ── Hook 链 ─────────────────────────────────────────────────────────
+	// ── Hook 链 ───────────────────────────────────────────────────────────
 	s.WriteString(`    chain prerouting_mangle {
         type filter hook prerouting priority mangle - 5; policy accept;
         jump proxy_pre
@@ -136,7 +135,7 @@ func buildNFTConf(cfg Config, gid uint32) string {
 
 `)
 
-	// ── DNS 劫持（可选）────────────────────────────────────────────────
+	// ── DNS 劫持（可选）──────────────────────────────────────────────────
 	if cfg.DNSPort > 0 {
 		dnsV4 := fmt.Sprintf(
 			"        ip daddr != 127.0.0.1 meta l4proto { tcp, udp } th dport 53 redirect to :%d\n",
@@ -169,7 +168,6 @@ func buildNFTConf(cfg Config, gid uint32) string {
 	return s.String()
 }
 
-// applyNFT 写入配置文件并执行 nft -f。
 func applyNFT(conf, confPath string) error {
 	if err := os.WriteFile(confPath, []byte(conf), 0644); err != nil {
 		return fmt.Errorf("write nft conf: %w", err)
@@ -180,7 +178,6 @@ func applyNFT(conf, confPath string) error {
 	return nil
 }
 
-// setupTProxyRoutes 添加 ip rule + ip route，让带 fwmark 的包走 loopback。
 func setupTProxyRoutes(ipv6 bool) {
 	cmds := []string{
 		fmt.Sprintf("ip rule add fwmark %s/%s table %d", tproxyMark, tproxyMask, tproxyTable),
@@ -199,7 +196,6 @@ func setupTProxyRoutes(ipv6 bool) {
 	}
 }
 
-// cleanupTProxyRoutes 删除 ip rule + ip route。
 func cleanupTProxyRoutes(ipv6 bool) {
 	cmds := []string{
 		fmt.Sprintf("ip rule del fwmark %s/%s table %d", tproxyMark, tproxyMask, tproxyTable),
@@ -218,7 +214,19 @@ func cleanupTProxyRoutes(ipv6 bool) {
 	}
 }
 
-// cleanupNFT 删除 nft 表和配置文件。
+// enableIPForward 开启内核 IP 转发，与 Singa enableIPForward 一致。
+// --lan 时必须开启，否则内核不会转发局域网流量。
+func enableIPForward(ipv6 bool) {
+	if err := runCmd("sysctl -w net.ipv4.ip_forward=1"); err != nil {
+		log.Printf("firewall: ip_forward: %v", err)
+	}
+	if ipv6 {
+		if err := runCmd("sysctl -w net.ipv6.conf.all.forwarding=1"); err != nil {
+			log.Printf("firewall: ipv6_forward: %v", err)
+		}
+	}
+}
+
 func cleanupNFT(confPath string) {
 	if err := runCmd(fmt.Sprintf("nft delete table inet %s", nftTableName)); err != nil {
 		log.Printf("firewall: nft delete table: %v", err)
@@ -228,7 +236,6 @@ func cleanupNFT(confPath string) {
 	}
 }
 
-// syncLocalIPs 把所有网卡地址加入 nft interface/interface6 集合。
 func syncLocalIPs(ipv6 bool) {
 	ifaces, err := net.Interfaces()
 	if err != nil {

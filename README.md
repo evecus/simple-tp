@@ -107,7 +107,7 @@ trun --tport 7897 --dport 5353 --ipv6 --fakeip \
 | IPv4 | `198.18.0.0/15` | sing-box FakeIP 默认范围 |
 | IPv6 | `fc00::/18` | sing-box FakeIP IPv6 默认范围 |
 
-私有段规则加 `ip daddr != 198.18.0.0/15` 前置条件，使 FakeIP 地址无法命中 return 规则，继续向下走到 `tp_mark`。
+逻辑与 Singa 一致：私有段规则加 `ip daddr != 198.18.0.0/15` 前置条件，使 FakeIP 地址无法命中 return 规则，继续向下走到 `tp_mark`。
 
 ### 本机地址绕过
 
