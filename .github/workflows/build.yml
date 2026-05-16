@@ -1,9 +1,6 @@
 name: Build
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -42,7 +39,6 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
 
@@ -55,6 +51,8 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v0.1.0
+          name: t v0.1.0
           files: |
             t-linux-amd64
             t-linux-arm64
