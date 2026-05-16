@@ -1,6 +1,5 @@
 # tproxy-core
-
-基于 [Singa](https://github.com/singa) 防火墙逻辑实现的 Linux TProxy 管理工具，用于透明代理 TCP/UDP 流量（含 IPv6），支持 DNS 劫持和 FakeIP 模式。
+Linux TProxy 管理工具，用于透明代理 TCP/UDP 流量（含 IPv6），支持 DNS 劫持和 FakeIP 模式。
 
 ## 工作原理
 
