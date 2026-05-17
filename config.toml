@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────
+# tproxyng 配置文件
+# 布尔值不填写默认为 false
+# ─────────────────────────────────────────────────────────────
+
+# 代理核心启动命令（必填）
+run = "/usr/bin/sing-box -c /etc/sing-box/config.json"
+
+# 透明代理模式（必填）
+# redir  → 仅 TCP，NAT redirect，兼容最旧内核
+# tproxy → TCP + UDP，需内核 >= 5.2
+# mixed  → TCP 走 tproxy，UDP 走 TUN
+# tun    → TCP + UDP 全走 TUN
+mode = "tproxy"
+
+# ── 端口配置 ──────────────────────────────────────────────────
+# tproxy 入站端口（mode = tproxy / mixed 时必填）
+tproxy_port = 7893
+
+# redir 入站端口（mode = redir 时必填）
+# redirect_port = 7892
+
+# 代理 DNS 监听端口（hijack_dns = true 时必填）
+# dns_port = 5353
+
+# TUN 网卡名称（mode = tun / mixed 时必填）
+# tun_name = "tun0"
+
+# ── 功能开关 ──────────────────────────────────────────────────
+# 劫持 DNS：将所有 :53 查询重定向到 dns_port
+hijack_dns = false
+
+# 启用 IPv6 规则
+ipv6 = false
+
+# 代理局域网设备流量（自动开启内核 ip_forward）
+lan = false
+
+# FakeIP 模式：放行代理的 fakeip 地址段，不当作私有地址丢弃
+fakeip = false
+
+# FakeIP 地址池（不填则使用 sing-box 默认值）
+# fakeip_v4_range = "198.18.0.0/15"
+# fakeip_v6_range = "fc00::/18"
+
+# ── 进程管理 ──────────────────────────────────────────────────
+# 代理异常退出时自动重启
+restart_on_fail = true
+
+# 最大重启次数（0 = 不限次数）
+max_restarts = 5
+
+# 保活：定期探测代理进程是否存活，被意外杀死时自动拉起
+keepalive = true
+
+# 保活探测间隔（秒）
+watch_interval = 5
+
+# ── 定时重启 ──────────────────────────────────────────────────
+# 按 cron 表达式定时重启代理核心（规则和路由保持不变，只重启进程）
+cron_restart = false
+
+# cron 表达式，5 字段：分 时 日 月 周
+# 示例：每天凌晨 3 点重启
+# cron_expr = "0 3 * * *"
