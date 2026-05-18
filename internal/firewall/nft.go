@@ -136,9 +136,11 @@ func buildManglePrerouting(cfg *config.Config, modes config.ProxyModes) string {
 	s.WriteString("\n    chain proxy_pre {\n")
 	if modes.NeedsTunInbound() {
 		s.WriteString(fmt.Sprintf("        iifname \"%s\" return\n", cfg.TunName))
+		// loopback protection: skip lo packets without tun mark
+		s.WriteString(fmt.Sprintf("        iifname \"lo\" meta mark & %s != %s return\n", tunFwMask, tunFwMark))
 	}
 	if modes.NeedsTProxyInbound() {
-		s.WriteString(fmt.Sprintf("        iifname \"lo\" mark & %s != %s return\n", tpFwMask, tpFwMark))
+		s.WriteString(fmt.Sprintf("        iifname \"lo\" meta mark & %s != %s return\n", tpFwMask, tpFwMark))
 	}
 	if cfg.LAN {
 		if cfg.IPv6 {
