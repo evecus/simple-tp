@@ -1,5 +1,3 @@
-// Package firewall manages nftables rules and ip rules/routes.
-// Rule generation logic ported directly from Singa's internal/firewall/nft.go.
 package firewall
 
 import (
@@ -14,25 +12,17 @@ import (
 )
 
 const (
-	nftTable = "tproxyng"
-	nftConf  = "/tmp/tproxyng.nft"
-
-	// TProxy mark/mask (Singa: 0x40/0xc0)
-	tpFwMark = "0x40"
-	tpFwMask = "0xc0"
-	tpTable  = 100
-
-	// TUN mark/mask (Singa: 0x41/0xc1)
+	nftTable  = "tproxyng"
+	nftConf   = "/tmp/tproxyng.nft"
+	tpFwMark  = "0x40"
+	tpFwMask  = "0xc0"
+	tpTable   = 100
 	tunFwMark = "0x41"
 	tunFwMask = "0xc1"
 	tunTable  = 101
 )
 
-// ── Singa's fakeip-aware private range functions ───────────────────────────
-
-// privateRangesV4 — copied verbatim from Singa nft.go.
-// When fakeip=true, 198.18.0.0/15 is exempted so fakeip traffic reaches
-// the proxy instead of being short-circuited.
+// privateRangesV4 — Singa logic verbatim.
 func privateRangesV4(fakeip bool, fakeIPv4Range string) string {
 	if fakeip {
 		return "" +
@@ -49,8 +39,7 @@ func privateRangesV4(fakeip bool, fakeIPv4Range string) string {
 		"192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/3 } return\n"
 }
 
-// privateRangesV6 — copied verbatim from Singa nft.go.
-// When fakeip=true, fc00::/18 is exempted (it is the fakeip IPv6 range).
+// privateRangesV6 — Singa logic verbatim.
 func privateRangesV6(fakeip bool, fakeIPv6Range string) string {
 	if fakeip {
 		return "        ip6 daddr != " + fakeIPv6Range + " ip6 daddr { ::/127, fc00::/7, fe80::/10, ff00::/8 } return\n"
@@ -58,20 +47,15 @@ func privateRangesV6(fakeip bool, fakeIPv6Range string) string {
 	return "        ip6 daddr { ::/127, fc00::/7, fe80::/10, ff00::/8 } return\n"
 }
 
-// ── Main table builder (mirrors Singa buildTable) ─────────────────────────
-
 func buildTable(cfg *config.Config, modes config.ProxyModes, gid uint32) string {
 	var s strings.Builder
-
 	s.WriteString(fmt.Sprintf("table inet %s {\n", nftTable))
 
-	// Interface address sets — populated after nft -f by SyncLocalIPs
 	s.WriteString("    set interface {\n        type ipv4_addr\n        flags interval\n        auto-merge\n    }\n")
 	if cfg.IPv6 {
 		s.WriteString("    set interface6 {\n        type ipv6_addr\n        flags interval\n        auto-merge\n    }\n")
 	}
 
-	// Mark chains — only defined when the mode needs them
 	if modes.NeedsTProxyInbound() {
 		s.WriteString(`
     chain tp_mark {
@@ -91,9 +75,8 @@ func buildTable(cfg *config.Config, modes config.ProxyModes, gid uint32) string 
 	}
 
 	s.WriteString(buildProxyRuleChain(cfg, modes))
-	s.WriteString(buildManglePrerouting(cfg, modes, gid))
+	s.WriteString(buildManglePrerouting(cfg, modes))
 	s.WriteString(buildMangleOutput(cfg, modes, gid))
-
 	s.WriteString(fmt.Sprintf(`
     chain prerouting_mangle {
         type filter hook prerouting priority mangle - 5; policy accept;
@@ -105,18 +88,14 @@ func buildTable(cfg *config.Config, modes config.ProxyModes, gid uint32) string 
         jump proxy_out
     }
 `))
-
 	s.WriteString(buildNATChains(cfg, modes, gid))
 	s.WriteString("}\n")
 	return s.String()
 }
 
-// buildProxyRuleChain mirrors Singa's buildProxyRuleChain.
 func buildProxyRuleChain(cfg *config.Config, modes config.ProxyModes) string {
 	var s strings.Builder
 	s.WriteString("\n    chain proxy_rule {\n")
-
-	// Restore ct mark for established flows
 	if modes.NeedsTProxyInbound() {
 		s.WriteString("        meta mark set ct mark\n")
 		s.WriteString(fmt.Sprintf("        meta mark & %s == %s return\n", tpFwMask, tpFwMark))
@@ -125,25 +104,17 @@ func buildProxyRuleChain(cfg *config.Config, modes config.ProxyModes) string {
 		s.WriteString("        meta mark set ct mark\n")
 		s.WriteString(fmt.Sprintf("        meta mark & %s == %s return\n", tunFwMask, tunFwMark))
 	}
-
-	// Private / reserved ranges (fakeip-aware, Singa logic)
 	s.WriteString(privateRangesV4(cfg.FakeIP, cfg.FakeIPv4Range))
 	if cfg.IPv6 {
 		s.WriteString(privateRangesV6(cfg.FakeIP, cfg.FakeIPv6Range))
 	}
-
-	// Local interface addresses
 	s.WriteString("        ip daddr @interface return\n")
 	if cfg.IPv6 {
 		s.WriteString("        ip6 daddr @interface6 return\n")
 	}
-
-	// Skip proxy's DNS port to prevent redirect loops
 	if cfg.HijackDNS && cfg.DNSPort > 0 {
 		s.WriteString(fmt.Sprintf("        meta l4proto { tcp, udp } th dport %d return\n", cfg.DNSPort))
 	}
-
-	// Jump to mark chain based on mode
 	switch modes.TCP {
 	case config.TCPModeTProxy:
 		s.WriteString("        meta l4proto tcp jump tp_mark\n")
@@ -156,26 +127,19 @@ func buildProxyRuleChain(cfg *config.Config, modes config.ProxyModes) string {
 	case config.UDPModeTun:
 		s.WriteString("        meta l4proto udp jump tun_mark\n")
 	}
-
 	s.WriteString("    }\n")
 	return s.String()
 }
 
-// buildManglePrerouting mirrors Singa's buildManglePrerouting.
-func buildManglePrerouting(cfg *config.Config, modes config.ProxyModes, gid uint32) string {
+func buildManglePrerouting(cfg *config.Config, modes config.ProxyModes) string {
 	var s strings.Builder
 	s.WriteString("\n    chain proxy_pre {\n")
-
-	// Skip traffic from TUN device (proxy's own packets)
 	if modes.NeedsTunInbound() {
 		s.WriteString(fmt.Sprintf("        iifname \"%s\" return\n", cfg.TunName))
 	}
-	// Skip unmarked loopback (proxy's own tproxy packets)
 	if modes.NeedsTProxyInbound() {
 		s.WriteString(fmt.Sprintf("        iifname \"lo\" mark & %s != %s return\n", tpFwMask, tpFwMark))
 	}
-
-	// LAN: intercept forwarded traffic (src != local AND dst != local)
 	if cfg.LAN {
 		if cfg.IPv6 {
 			s.WriteString("        meta nfproto { ipv4, ipv6 } meta l4proto { tcp, udp } fib saddr type != local fib daddr type != local jump proxy_rule\n")
@@ -183,22 +147,16 @@ func buildManglePrerouting(cfg *config.Config, modes config.ProxyModes, gid uint
 			s.WriteString("        meta nfproto ipv4 meta l4proto { tcp, udp } fib saddr type != local fib daddr type != local jump proxy_rule\n")
 		}
 	}
-
-	// TProxy redirect for marked packets
 	if modes.NeedsTProxyInbound() {
-		s.WriteString(fmt.Sprintf("        meta nfproto ipv4 meta l4proto { tcp, udp } mark & %s == %s tproxy ip to 127.0.0.1:%d\n",
-			tpFwMask, tpFwMark, cfg.TProxyPort))
+		s.WriteString(fmt.Sprintf("        meta nfproto ipv4 meta l4proto { tcp, udp } mark & %s == %s tproxy ip to 127.0.0.1:%d\n", tpFwMask, tpFwMark, cfg.TProxyPort))
 		if cfg.IPv6 {
-			s.WriteString(fmt.Sprintf("        meta nfproto ipv6 meta l4proto { tcp, udp } mark & %s == %s tproxy ip6 to [::1]:%d\n",
-				tpFwMask, tpFwMark, cfg.TProxyPort))
+			s.WriteString(fmt.Sprintf("        meta nfproto ipv6 meta l4proto { tcp, udp } mark & %s == %s tproxy ip6 to [::1]:%d\n", tpFwMask, tpFwMark, cfg.TProxyPort))
 		}
 	}
-
 	s.WriteString("    }\n")
 	return s.String()
 }
 
-// buildMangleOutput mirrors Singa's buildMangleOutput.
 func buildMangleOutput(cfg *config.Config, modes config.ProxyModes, gid uint32) string {
 	var s strings.Builder
 	s.WriteString("\n    chain proxy_out {\n")
@@ -212,47 +170,30 @@ func buildMangleOutput(cfg *config.Config, modes config.ProxyModes, gid uint32) 
 	return s.String()
 }
 
-// buildNATChains mirrors Singa's buildNATChains.
 func buildNATChains(cfg *config.Config, modes config.ProxyModes, gid uint32) string {
 	var s strings.Builder
-
-	// DNS redirect chain (only when hijack_dns + dns_port set)
 	if cfg.HijackDNS && cfg.DNSPort > 0 {
 		dnsV4 := fmt.Sprintf("        ip daddr != 127.0.0.1 meta l4proto { tcp, udp } th dport 53 redirect to :%d\n", cfg.DNSPort)
 		dnsV6 := ""
 		if cfg.IPv6 {
 			dnsV6 = fmt.Sprintf("        ip6 daddr != ::1 meta l4proto { tcp, udp } th dport 53 redirect to :%d\n", cfg.DNSPort)
 		}
-		s.WriteString(fmt.Sprintf(`
-    chain dns_redirect {
-        skgid %d return
-        meta l4proto { tcp, udp } th dport %d return
-%s%s    }
-`, gid, cfg.DNSPort, dnsV4, dnsV6))
+		s.WriteString(fmt.Sprintf("\n    chain dns_redirect {\n        skgid %d return\n        meta l4proto { tcp, udp } th dport %d return\n%s%s    }\n",
+			gid, cfg.DNSPort, dnsV4, dnsV6))
 	}
-
-	// TCP redirect chain for redir mode
 	if modes.TCP == config.TCPModeRedir {
 		nfproto := "meta nfproto ipv4"
 		if cfg.IPv6 {
 			nfproto = "meta nfproto { ipv4, ipv6 }"
 		}
-		v6ranges := ""
+		v6 := ""
 		if cfg.IPv6 {
-			v6ranges = privateRangesV6(cfg.FakeIP, cfg.FakeIPv6Range)
+			v6 = privateRangesV6(cfg.FakeIP, cfg.FakeIPv6Range)
 		}
-		s.WriteString(fmt.Sprintf(`
-    chain tcp_redirect {
-        skgid %d return
-%s%s        ip daddr @interface return
-        %s meta l4proto tcp redirect to :%d
-    }
-`, gid, privateRangesV4(cfg.FakeIP, cfg.FakeIPv4Range), v6ranges, nfproto, cfg.RedirectPort))
+		s.WriteString(fmt.Sprintf("\n    chain tcp_redirect {\n        skgid %d return\n%s%s        ip daddr @interface return\n        %s meta l4proto tcp redirect to :%d\n    }\n",
+			gid, privateRangesV4(cfg.FakeIP, cfg.FakeIPv4Range), v6, nfproto, cfg.RedirectPort))
 	}
-
-	// Hook chains
-	s.WriteString("\n    chain prerouting_nat {\n")
-	s.WriteString("        type nat hook prerouting priority dstnat - 5; policy accept;\n")
+	s.WriteString("\n    chain prerouting_nat {\n        type nat hook prerouting priority dstnat - 5; policy accept;\n")
 	if cfg.HijackDNS && cfg.DNSPort > 0 {
 		s.WriteString("        jump dns_redirect\n")
 	}
@@ -260,9 +201,7 @@ func buildNATChains(cfg *config.Config, modes config.ProxyModes, gid uint32) str
 		s.WriteString("        jump tcp_redirect\n")
 	}
 	s.WriteString("    }\n")
-
-	s.WriteString("\n    chain output_nat {\n")
-	s.WriteString("        type nat hook output priority -105; policy accept;\n")
+	s.WriteString("\n    chain output_nat {\n        type nat hook output priority -105; policy accept;\n")
 	if cfg.HijackDNS && cfg.DNSPort > 0 {
 		s.WriteString("        jump dns_redirect\n")
 	}
@@ -270,22 +209,93 @@ func buildNATChains(cfg *config.Config, modes config.ProxyModes, gid uint32) str
 		s.WriteString("        jump tcp_redirect\n")
 	}
 	s.WriteString("    }\n")
-
 	return s.String()
 }
 
-// ── Routes (mirrors Singa setupRoutes) ────────────────────────────────────
+// Apply sets up nft rules. Returns error if ANY step fails — caller must not start the proxy.
+func Apply(cfg *config.Config, gid uint32) error {
+	Stop() // clean previous state first
 
-func setupRoutes(cfg *config.Config, modes config.ProxyModes) {
+	modes := cfg.Modes()
+	activeCfg = cfg
+	activeModes = modes
+
+	conf := buildTable(cfg, modes, gid)
+	if err := os.WriteFile(nftConf, []byte(conf), 0644); err != nil {
+		return fmt.Errorf("write nft conf: %w", err)
+	}
+
+	// Routes: strict — return error on failure
+	if err := setupRoutes(cfg, modes); err != nil {
+		_ = os.Remove(nftConf)
+		activeCfg = nil
+		activeModes = config.ProxyModes{}
+		return err
+	}
+
+	if cfg.LAN {
+		enableIPForward(cfg.IPv6)
+	}
+
+	if err := runCmd("nft -f " + nftConf); err != nil {
+		// Rules failed — clean up routes we just added
+		cleanupRoutes(cfg, modes)
+		_ = os.Remove(nftConf)
+		activeCfg = nil
+		activeModes = config.ProxyModes{}
+		return fmt.Errorf("nft -f: %w", err)
+	}
+
+	SyncLocalIPs(cfg.IPv6)
+	return nil
+}
+
+func ApplyTunRoutes() {
+	if activeCfg == nil {
+		return
+	}
+	setupTunRoutes(activeCfg)
+}
+
+func Stop() {
+	_ = runCmd(fmt.Sprintf("nft delete table inet %s", nftTable))
+	_ = os.Remove(nftConf)
+	if activeCfg != nil {
+		cleanupRoutes(activeCfg, activeModes)
+	}
+	activeCfg = nil
+	activeModes = config.ProxyModes{}
+}
+
+var (
+	activeCfg   *config.Config
+	activeModes config.ProxyModes
+)
+
+// setupRoutes returns error if a critical route command fails.
+func setupRoutes(cfg *config.Config, modes config.ProxyModes) error {
 	if modes.NeedsTProxyInbound() {
-		setupTProxyRoutes(cfg.IPv6)
+		if err := setupTProxyRoutes(cfg.IPv6); err != nil {
+			return err
+		}
 	}
 	if modes.NeedsTunInbound() {
-		setupTunRoutes(cfg)
+		setupTunRoutes(cfg) // best-effort, tun device may not exist yet
+	}
+	return nil
+}
+
+func cleanupRoutes(cfg *config.Config, modes config.ProxyModes) {
+	if modes.NeedsTProxyInbound() {
+		cleanupTProxyRoutes(cfg.IPv6)
+	}
+	if modes.NeedsTunInbound() {
+		cleanupTunRoutes(cfg)
 	}
 }
 
-func setupTProxyRoutes(ipv6 bool) {
+// setupTProxyRoutes returns error: if ip rule/route fail, tproxy won't work at all.
+func setupTProxyRoutes(ipv6 bool) error {
 	cmds := []string{
 		fmt.Sprintf("ip rule add fwmark %s/%s table %d", tpFwMark, tpFwMask, tpTable),
 		fmt.Sprintf("ip route add local 0.0.0.0/0 dev lo table %d", tpTable),
@@ -298,12 +308,12 @@ func setupTProxyRoutes(ipv6 bool) {
 	}
 	for _, c := range cmds {
 		if err := runCmd(c); err != nil {
-			log.Printf("firewall: tproxy route: %v", err)
+			return fmt.Errorf("tproxy route: %w", err)
 		}
 	}
+	return nil
 }
 
-// setupTunRoutes mirrors Singa's setupTunRoutes exactly.
 func setupTunRoutes(cfg *config.Config) {
 	dev := cfg.TunName
 	cmds := []string{
@@ -340,16 +350,12 @@ func cleanupTProxyRoutes(ipv6 bool) {
 			fmt.Sprintf("ip -6 route del local ::/0 dev lo table %d", tpTable),
 		)
 	}
-	for _, c := range cmds {
-		_ = runCmd(c)
-	}
+	for _, c := range cmds { _ = runCmd(c) }
 }
 
 func cleanupTunRoutes(cfg *config.Config) {
 	dev := cfg.TunName
-	if dev == "" {
-		dev = "tun0"
-	}
+	if dev == "" { dev = "tun0" }
 	cmds := []string{
 		fmt.Sprintf("ip rule del fwmark %s/%s table %d", tunFwMark, tunFwMask, tunTable),
 		fmt.Sprintf("ip route del default dev %s table %d", dev, tunTable),
@@ -362,12 +368,8 @@ func cleanupTunRoutes(cfg *config.Config) {
 			fmt.Sprintf("ip -6 route del %s dev %s", cfg.FakeIPv6Range, dev),
 		)
 	}
-	for _, c := range cmds {
-		_ = runCmd(c)
-	}
+	for _, c := range cmds { _ = runCmd(c) }
 }
-
-// ── IP forward ────────────────────────────────────────────────────────────
 
 func enableIPForward(ipv6 bool) {
 	if err := runCmd("sysctl -w net.ipv4.ip_forward=1"); err != nil {
@@ -380,10 +382,6 @@ func enableIPForward(ipv6 bool) {
 	}
 }
 
-// ── Interface IP sync (mirrors Singa watcher.go + AddInterfaceIP) ─────────
-
-// SyncLocalIPs adds all current interface CIDRs to the nft sets.
-// Called once after nft -f (same as Singa).
 func SyncLocalIPs(ipv6 bool) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -392,126 +390,37 @@ func SyncLocalIPs(ipv6 bool) {
 	}
 	for _, addr := range addrs {
 		ipnet, ok := addr.(*net.IPNet)
-		if !ok {
-			continue
-		}
+		if !ok { continue }
 		isV6 := ipnet.IP.To4() == nil
-		if isV6 && !ipv6 {
-			continue
-		}
+		if isV6 && !ipv6 { continue }
 		set := "interface"
-		if isV6 {
-			set = "interface6"
-		}
-		cidr := ipnet.String()
-		if err := runCmd(fmt.Sprintf("nft add element inet %s %s { %s }", nftTable, set, cidr)); err != nil {
-			log.Printf("firewall: sync %s: %v", cidr, err)
+		if isV6 { set = "interface6" }
+		if err := runCmd(fmt.Sprintf("nft add element inet %s %s { %s }", nftTable, set, ipnet.String())); err != nil {
+			log.Printf("firewall: sync %s: %v", ipnet.String(), err)
 		}
 	}
 }
 
-// ── Apply / Stop (mirrors Singa firewall/manager.go) ──────────────────────
-
-var (
-	activeCfg   *config.Config
-	activeModes config.ProxyModes
-)
-
-// Apply sets up nftables + routes for cfg.
-func Apply(cfg *config.Config, gid uint32) error {
-	// Clean up any previous state first
-	Stop()
-
-	modes := cfg.Modes()
-	activeCfg = cfg
-	activeModes = modes
-
-	conf := buildTable(cfg, modes, gid)
-	if err := os.WriteFile(nftConf, []byte(conf), 0644); err != nil {
-		return fmt.Errorf("write nft conf: %w", err)
-	}
-
-	setupRoutes(cfg, modes)
-
-	if cfg.LAN {
-		enableIPForward(cfg.IPv6)
-	}
-
-	if err := runCmd("nft -f " + nftConf); err != nil {
-		return fmt.Errorf("nft -f: %w", err)
-	}
-
-	SyncLocalIPs(cfg.IPv6)
-
-	// For tun/mixed: routes are applied after the tun device appears.
-	// ApplyTunRoutes() is called by the process manager once the device is up.
-	return nil
-}
-
-// ApplyTunRoutes re-adds tun ip rules/routes after the TUN device appears.
-// Mirrors Singa's firewall.ApplyTunRoutes.
-func ApplyTunRoutes() {
-	if activeCfg == nil {
-		return
-	}
-	setupTunRoutes(activeCfg)
-}
-
-// Stop tears down nftables and routes.
-func Stop() {
-	_ = runCmd(fmt.Sprintf("nft delete table inet %s", nftTable))
-	_ = os.Remove(nftConf)
-
-	if activeModes.NeedsTProxyInbound() {
-		ipv6 := false
-		if activeCfg != nil {
-			ipv6 = activeCfg.IPv6
-		}
-		cleanupTProxyRoutes(ipv6)
-	}
-	if activeModes.NeedsTunInbound() && activeCfg != nil {
-		cleanupTunRoutes(activeCfg)
-	}
-
-	activeCfg = nil
-	activeModes = config.ProxyModes{}
-}
-
-// ── iptables fallback ─────────────────────────────────────────────────────
-
-// UseIPTables returns true when nft is unavailable but iptables is.
 func UseIPTables() bool {
 	_, nftErr := exec.LookPath("nft")
 	_, iptErr := exec.LookPath("iptables")
 	return nftErr != nil && iptErr == nil
 }
 
-// ApplyIPTables sets up iptables rules as a fallback for older kernels.
-// Supports redir (TCP only via REDIRECT) and DNS hijack.
 func ApplyIPTables(cfg *config.Config, gid uint32) error {
+	StopIPTables()
 	modes := cfg.Modes()
 	activeCfg = cfg
 	activeModes = modes
 
-	// Flush existing rules in our chains
-	_ = runCmd("iptables -t mangle -F TPROXYNG_MANGLE 2>/dev/null")
-	_ = runCmd("iptables -t nat -F TPROXYNG_NAT 2>/dev/null")
-	_ = runCmd("iptables -t mangle -X TPROXYNG_MANGLE 2>/dev/null")
-	_ = runCmd("iptables -t nat -X TPROXYNG_NAT 2>/dev/null")
-
-	// DNS hijack via NAT REDIRECT
 	if cfg.HijackDNS && cfg.DNSPort > 0 {
 		cmds := []string{
 			"iptables -t nat -N TPROXYNG_NAT",
-			// skip proxy group
 			fmt.Sprintf("iptables -t nat -A TPROXYNG_NAT -m owner --gid-owner %d -j RETURN", gid),
-			// skip already-redirected DNS
 			fmt.Sprintf("iptables -t nat -A TPROXYNG_NAT -p tcp --dport %d -j RETURN", cfg.DNSPort),
 			fmt.Sprintf("iptables -t nat -A TPROXYNG_NAT -p udp --dport %d -j RETURN", cfg.DNSPort),
-			// redirect :53
 			fmt.Sprintf("iptables -t nat -A TPROXYNG_NAT -p tcp --dport 53 -j REDIRECT --to-port %d", cfg.DNSPort),
 			fmt.Sprintf("iptables -t nat -A TPROXYNG_NAT -p udp --dport 53 -j REDIRECT --to-port %d", cfg.DNSPort),
-			// hook
 			"iptables -t nat -A OUTPUT -j TPROXYNG_NAT",
 			"iptables -t nat -A PREROUTING -j TPROXYNG_NAT",
 		}
@@ -521,14 +430,14 @@ func ApplyIPTables(cfg *config.Config, gid uint32) error {
 			}
 		}
 	}
-
-	// TCP redir via NAT REDIRECT
 	if modes.TCP == config.TCPModeRedir {
-		setupTProxyRoutes(cfg.IPv6)
+		if err := setupTProxyRoutes(cfg.IPv6); err != nil {
+			StopIPTables()
+			return err
+		}
 		cmds := []string{
 			"iptables -t nat -N TPROXYNG_REDIR",
 			fmt.Sprintf("iptables -t nat -A TPROXYNG_REDIR -m owner --gid-owner %d -j RETURN", gid),
-			// private ranges
 			"iptables -t nat -A TPROXYNG_REDIR -d 127.0.0.0/8 -j RETURN",
 			"iptables -t nat -A TPROXYNG_REDIR -d 10.0.0.0/8 -j RETURN",
 			"iptables -t nat -A TPROXYNG_REDIR -d 172.16.0.0/12 -j RETURN",
@@ -543,15 +452,12 @@ func ApplyIPTables(cfg *config.Config, gid uint32) error {
 			}
 		}
 	}
-
 	if cfg.LAN {
 		enableIPForward(cfg.IPv6)
 	}
-
 	return nil
 }
 
-// StopIPTables removes iptables rules.
 func StopIPTables() {
 	cmds := []string{
 		"iptables -t nat -D OUTPUT -j TPROXYNG_NAT",
@@ -563,27 +469,17 @@ func StopIPTables() {
 		"iptables -t nat -F TPROXYNG_REDIR",
 		"iptables -t nat -X TPROXYNG_REDIR",
 	}
-	for _, c := range cmds {
-		_ = runCmd(c)
-	}
-	if activeModes.NeedsTProxyInbound() {
-		ipv6 := false
-		if activeCfg != nil {
-			ipv6 = activeCfg.IPv6
-		}
-		cleanupTProxyRoutes(ipv6)
+	for _, c := range cmds { _ = runCmd(c) }
+	if activeCfg != nil {
+		cleanupTProxyRoutes(activeCfg.IPv6)
 	}
 	activeCfg = nil
 	activeModes = config.ProxyModes{}
 }
 
-// ── Helper ────────────────────────────────────────────────────────────────
-
 func runCmd(command string) error {
 	parts := strings.Fields(command)
-	if len(parts) == 0 {
-		return nil
-	}
+	if len(parts) == 0 { return nil }
 	out, err := exec.Command(parts[0], parts[1:]...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w (output: %s)", command, err, strings.TrimSpace(string(out)))

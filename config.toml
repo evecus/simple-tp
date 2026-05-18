@@ -13,53 +13,38 @@ run = "/usr/bin/sing-box -c /etc/sing-box/config.json"
 # tun    → TCP + UDP 全走 TUN
 mode = "tproxy"
 
-# ── 端口配置 ──────────────────────────────────────────────────
-# tproxy 入站端口（mode = tproxy / mixed 时必填）
-tproxy_port = 7893
-
-# redir 入站端口（mode = redir 时必填）
-# redirect_port = 7892
-
-# 代理 DNS 监听端口（hijack_dns = true 时必填）
-# dns_port = 5353
-
-# TUN 网卡名称（mode = tun / mixed 时必填）
-# tun_name = "tun0"
+# ── 端口 ──────────────────────────────────────────────────────
+tproxy_port   = 7893    # tproxy 入站端口（mode = tproxy/mixed 时必填）
+# redirect_port = 7892  # redir 入站端口（mode = redir 时必填）
+# dns_port      = 5353  # 代理 DNS 端口（hijack_dns = true 时必填）
+# tun_name      = "tun0"  # TUN 网卡名（mode = tun/mixed 时必填）
 
 # ── 功能开关 ──────────────────────────────────────────────────
-# 劫持 DNS：将所有 :53 查询重定向到 dns_port
-hijack_dns = false
+hijack_dns = false   # 劫持 :53 → dns_port
+ipv6       = false   # 启用 IPv6 规则
+lan        = false   # 代理局域网设备（自动开启 ip_forward）
+fakeip     = false   # FakeIP 模式
 
-# 启用 IPv6 规则
-ipv6 = false
-
-# 代理局域网设备流量（自动开启内核 ip_forward）
-lan = false
-
-# FakeIP 模式：放行代理的 fakeip 地址段，不当作私有地址丢弃
-fakeip = false
-
-# FakeIP 地址池（不填则使用 sing-box 默认值）
+# FakeIP 地址池（不填使用 sing-box 默认值）
 # fakeip_v4_range = "198.18.0.0/15"
 # fakeip_v6_range = "fc00::/18"
 
 # ── 进程管理 ──────────────────────────────────────────────────
-# 代理异常退出时自动重启
-restart_on_fail = true
+restart_on_fail = true   # 异常退出时自动重启
+max_restarts    = 5      # 最大重启次数（0 = 不限）
+keepalive       = true   # 进程被意外杀死时自动拉起
+watch_interval  = 5      # 保活探测间隔（秒）
 
-# 最大重启次数（0 = 不限次数）
-max_restarts = 5
+# 启动确认：进程启动后等待 N 秒确认没有立即崩溃
+# 失败则清理规则和路由，不留垃圾
+start_timeout = 3
 
-# 保活：定期探测代理进程是否存活，被意外杀死时自动拉起
-keepalive = true
-
-# 保活探测间隔（秒）
-watch_interval = 5
+# ── 资源限制（超限则重启核心，规则/路由不动）─────────────────
+max_memory_mb           = 0     # 内存上限 MB（0 = 不限，例如 512）
+max_cpu_percent         = 0     # CPU 上限 %（0 = 不限，例如 90.0）
+resource_check_interval = 10    # 资源检查间隔（秒）
 
 # ── 定时重启 ──────────────────────────────────────────────────
-# 按 cron 表达式定时重启代理核心（规则和路由保持不变，只重启进程）
+# 按 cron 定时重启核心（规则和路由保持不变，只重启进程）
 cron_restart = false
-
-# cron 表达式，5 字段：分 时 日 月 周
-# 示例：每天凌晨 3 点重启
-# cron_expr = "0 3 * * *"
+# cron_expr  = "0 3 * * *"   # 每天凌晨 3 点

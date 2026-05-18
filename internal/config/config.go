@@ -7,16 +7,14 @@ import (
 	"strings"
 )
 
-// ── Proxy modes (mirrors Singa's config.ProxyModes) ───────────────────────
-
 type TCPMode string
 type UDPMode string
 
 const (
 	TCPModeOff    TCPMode = "off"
-	TCPModeRedir  TCPMode = "redir"   // NAT redirect, most compatible
-	TCPModeTProxy TCPMode = "tproxy"  // TPROXY, needs kernel >= 5.2
-	TCPModeTun    TCPMode = "tun"     // TUN virtual NIC
+	TCPModeRedir  TCPMode = "redir"
+	TCPModeTProxy TCPMode = "tproxy"
+	TCPModeTun    TCPMode = "tun"
 )
 
 const (
@@ -25,67 +23,57 @@ const (
 	UDPModeTun    UDPMode = "tun"
 )
 
-// ProxyModes bundles independent TCP and UDP mode choices.
-// Mirrors Singa's config.ProxyModes exactly.
 type ProxyModes struct {
 	TCP TCPMode
 	UDP UDPMode
 }
 
-func (pm ProxyModes) NeedsTProxyInbound() bool {
-	return pm.TCP == TCPModeTProxy || pm.UDP == UDPModeTProxy
-}
-func (pm ProxyModes) NeedsRedirectInbound() bool {
-	return pm.TCP == TCPModeRedir
-}
-func (pm ProxyModes) NeedsTunInbound() bool {
-	return pm.TCP == TCPModeTun || pm.UDP == UDPModeTun
-}
+func (pm ProxyModes) NeedsTProxyInbound() bool  { return pm.TCP == TCPModeTProxy || pm.UDP == UDPModeTProxy }
+func (pm ProxyModes) NeedsRedirectInbound() bool { return pm.TCP == TCPModeRedir }
+func (pm ProxyModes) NeedsTunInbound() bool      { return pm.TCP == TCPModeTun || pm.UDP == UDPModeTun }
 func (pm ProxyModes) NeedsAnyInbound() bool {
 	return pm.NeedsTProxyInbound() || pm.NeedsRedirectInbound() || pm.NeedsTunInbound()
 }
 
-// ── Config schema ──────────────────────────────────────────────────────────
-
-// Config is the top-level config file structure.
-// All bool fields default to false when absent.
 type Config struct {
-	// Mode selects the transparent proxy method.
-	// "redir"  → TCP only, NAT redirect (widest compat)
-	// "tproxy" → TCP + UDP via TPROXY
-	// "mixed"  → TCP via TPROXY, UDP via TUN
-	// "tun"    → TCP + UDP via TUN
-	Mode string `json:"mode"` // required
+	// 必填
+	Run  string `json:"run"`
+	Mode string `json:"mode"`
 
-	// Ports
-	DNSPort      int `json:"dns_port"`      // proxy DNS listener port (enables DNS hijack when set)
-	RedirectPort int `json:"redirect_port"` // redir inbound port (redir / mixed mode)
-	TProxyPort   int `json:"tproxy_port"`   // tproxy inbound port
-	TunName      string `json:"tun_name"`   // TUN interface name, default "tun0"
+	// 端口
+	DNSPort      int    `json:"dns_port"`
+	RedirectPort int    `json:"redirect_port"`
+	TProxyPort   int    `json:"tproxy_port"`
+	TunName      string `json:"tun_name"`
 
-	// Feature flags (absent = false)
-	HijackDNS bool `json:"hijack_dns"` // redirect :53 → dns_port
+	// 功能开关
+	HijackDNS bool `json:"hijack_dns"`
 	IPv6      bool `json:"ipv6"`
-	LAN       bool `json:"lan"`    // proxy LAN devices, enables ip_forward
+	LAN       bool `json:"lan"`
 	FakeIP    bool `json:"fakeip"`
 
-	// FakeIP address pools (Singa defaults when empty)
-	FakeIPv4Range string `json:"fakeip_v4_range"` // default: 198.18.0.0/15
-	FakeIPv6Range string `json:"fakeip_v6_range"` // default: fc00::/18
+	FakeIPv4Range string `json:"fakeip_v4_range"`
+	FakeIPv6Range string `json:"fakeip_v6_range"`
 
-	// Process management
-	Run            string `json:"run"`              // required: proxy command
-	RestartOnFail  bool   `json:"restart_on_fail"`  // restart on non-zero exit
-	MaxRestarts    int    `json:"max_restarts"`      // 0 = unlimited
-	Keepalive      bool   `json:"keepalive"`         // restart if process dies unexpectedly
-	WatchInterval  int    `json:"watch_interval"`    // keepalive poll interval seconds, default 5
+	// 进程管理
+	RestartOnFail bool `json:"restart_on_fail"`
+	MaxRestarts   int  `json:"max_restarts"`
+	Keepalive     bool `json:"keepalive"`
+	WatchInterval int  `json:"watch_interval"` // seconds
 
-	// Scheduled restart
+	// 启动保护
+	StartTimeout int `json:"start_timeout"` // seconds: wait to confirm process didn't immediately crash (default 3)
+
+	// 资源限制（超限则重启核心，规则不动）
+	MaxMemoryMB  int     `json:"max_memory_mb"`   // 0 = disabled
+	MaxCPUPct    float64 `json:"max_cpu_percent"`  // 0 = disabled, e.g. 90.0
+	ResourceCheckInterval int `json:"resource_check_interval"` // seconds, default 10
+
+	// 定时重启
 	CronRestart bool   `json:"cron_restart"`
-	CronExpr    string `json:"cron_expr"` // e.g. "0 3 * * *"
+	CronExpr    string `json:"cron_expr"`
 }
 
-// Filled returns a copy of c with defaults applied.
 func (c Config) Filled() Config {
 	if c.Mode == "" {
 		c.Mode = "tproxy"
@@ -94,21 +82,23 @@ func (c Config) Filled() Config {
 		c.TunName = "tun0"
 	}
 	if c.FakeIPv4Range == "" {
-		c.FakeIPv4Range = "198.18.0.0/15" // Singa default
+		c.FakeIPv4Range = "198.18.0.0/15"
 	}
 	if c.FakeIPv6Range == "" {
-		c.FakeIPv6Range = "fc00::/18" // Singa default
+		c.FakeIPv6Range = "fc00::/18"
 	}
 	if c.WatchInterval <= 0 {
 		c.WatchInterval = 5
 	}
-	if c.MaxRestarts == 0 && c.RestartOnFail {
-		c.MaxRestarts = 0 // 0 = unlimited
+	if c.StartTimeout <= 0 {
+		c.StartTimeout = 3
+	}
+	if c.ResourceCheckInterval <= 0 {
+		c.ResourceCheckInterval = 10
 	}
 	return c
 }
 
-// Modes derives ProxyModes from Mode string.
 func (c Config) Modes() ProxyModes {
 	switch strings.ToLower(c.Mode) {
 	case "redir":
@@ -124,7 +114,6 @@ func (c Config) Modes() ProxyModes {
 	}
 }
 
-// Validate returns an error if the config is missing required fields.
 func (c Config) Validate() error {
 	if c.Run == "" {
 		return fmt.Errorf("run is required")
@@ -150,19 +139,20 @@ func (c Config) Validate() error {
 	if c.CronRestart && c.CronExpr == "" {
 		return fmt.Errorf("cron_expr is required when cron_restart = true")
 	}
+	if c.MaxMemoryMB < 0 {
+		return fmt.Errorf("max_memory_mb must be >= 0")
+	}
+	if c.MaxCPUPct < 0 || c.MaxCPUPct > 100 {
+		return fmt.Errorf("max_cpu_percent must be between 0 and 100")
+	}
 	return nil
 }
 
-// ── Loader ─────────────────────────────────────────────────────────────────
-
-// Load reads and parses a config file. Supports .toml, .json.
-// Format is detected from file extension; falls back to JSON.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
-
 	var cfg Config
 	ext := strings.ToLower(path)
 	switch {
@@ -170,21 +160,17 @@ func Load(path string) (*Config, error) {
 		if err := parseTOML(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse toml: %w", err)
 		}
-	default: // .json or unknown
+	default:
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse json: %w", err)
 		}
 	}
-
 	filled := cfg.Filled()
 	if err := filled.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
 	return &filled, nil
 }
-
-// ── Minimal TOML parser (no external deps) ────────────────────────────────
-// Supports: string, int, bool scalar values (no arrays/tables needed here).
 
 func parseTOML(data []byte, cfg *Config) error {
 	lines := strings.Split(string(data), "\n")
@@ -199,11 +185,9 @@ func parseTOML(data []byte, cfg *Config) error {
 		}
 		key := strings.TrimSpace(line[:idx])
 		val := strings.TrimSpace(line[idx+1:])
-		// strip inline comment
 		if ci := strings.Index(val, " #"); ci >= 0 {
 			val = strings.TrimSpace(val[:ci])
 		}
-		// strip quotes
 		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
 			val = val[1 : len(val)-1]
 		}
@@ -215,71 +199,40 @@ func parseTOML(data []byte, cfg *Config) error {
 }
 
 func setField(cfg *Config, key, val string) error {
-	b, err := boolVal(val)
+	b, berr := boolVal(val)
+	i, ierr := intVal(val)
+	f, ferr := floatVal(val)
 	switch key {
-	// strings
-	case "mode":
-		cfg.Mode = val
-	case "run":
-		cfg.Run = val
-	case "tun_name":
-		cfg.TunName = val
-	case "fakeip_v4_range":
-		cfg.FakeIPv4Range = val
-	case "fakeip_v6_range":
-		cfg.FakeIPv6Range = val
-	case "cron_expr":
-		cfg.CronExpr = val
-	// ints
-	case "dns_port":
-		cfg.DNSPort, err = intVal(val)
-	case "redirect_port":
-		cfg.RedirectPort, err = intVal(val)
-	case "tproxy_port":
-		cfg.TProxyPort, err = intVal(val)
-	case "max_restarts":
-		cfg.MaxRestarts, err = intVal(val)
-	case "watch_interval":
-		cfg.WatchInterval, err = intVal(val)
-	// bools
-	case "hijack_dns":
-		if err == nil {
-			cfg.HijackDNS = b
-		}
-	case "ipv6":
-		if err == nil {
-			cfg.IPv6 = b
-		}
-	case "lan":
-		if err == nil {
-			cfg.LAN = b
-		}
-	case "fakeip":
-		if err == nil {
-			cfg.FakeIP = b
-		}
-	case "restart_on_fail":
-		if err == nil {
-			cfg.RestartOnFail = b
-		}
-	case "keepalive":
-		if err == nil {
-			cfg.Keepalive = b
-		}
-	case "cron_restart":
-		if err == nil {
-			cfg.CronRestart = b
-		}
+	case "run":            cfg.Run = val
+	case "mode":          cfg.Mode = val
+	case "tun_name":      cfg.TunName = val
+	case "fakeip_v4_range": cfg.FakeIPv4Range = val
+	case "fakeip_v6_range": cfg.FakeIPv6Range = val
+	case "cron_expr":     cfg.CronExpr = val
+	case "dns_port":      if ierr == nil { cfg.DNSPort = i }; return ierr
+	case "redirect_port": if ierr == nil { cfg.RedirectPort = i }; return ierr
+	case "tproxy_port":   if ierr == nil { cfg.TProxyPort = i }; return ierr
+	case "max_restarts":  if ierr == nil { cfg.MaxRestarts = i }; return ierr
+	case "watch_interval": if ierr == nil { cfg.WatchInterval = i }; return ierr
+	case "start_timeout": if ierr == nil { cfg.StartTimeout = i }; return ierr
+	case "max_memory_mb": if ierr == nil { cfg.MaxMemoryMB = i }; return ierr
+	case "resource_check_interval": if ierr == nil { cfg.ResourceCheckInterval = i }; return ierr
+	case "max_cpu_percent": if ferr == nil { cfg.MaxCPUPct = f }; return ferr
+	case "hijack_dns":    if berr == nil { cfg.HijackDNS = b }; return berr
+	case "ipv6":          if berr == nil { cfg.IPv6 = b }; return berr
+	case "lan":           if berr == nil { cfg.LAN = b }; return berr
+	case "fakeip":        if berr == nil { cfg.FakeIP = b }; return berr
+	case "restart_on_fail": if berr == nil { cfg.RestartOnFail = b }; return berr
+	case "keepalive":     if berr == nil { cfg.Keepalive = b }; return berr
+	case "cron_restart":  if berr == nil { cfg.CronRestart = b }; return berr
 	}
-	return err
+	return nil
 }
 
 func boolVal(s string) (bool, error) {
 	switch strings.ToLower(s) {
-	case "true", "yes", "1":
-		return true, nil
-	case "false", "no", "0":
-		return false, nil
+	case "true", "yes", "1":  return true, nil
+	case "false", "no", "0": return false, nil
 	}
 	return false, fmt.Errorf("invalid bool %q", s)
 }
@@ -290,47 +243,56 @@ func intVal(s string) (int, error) {
 	return v, err
 }
 
-// ── Example config generator ───────────────────────────────────────────────
+func floatVal(s string) (float64, error) {
+	var v float64
+	_, err := fmt.Sscan(s, &v)
+	return v, err
+}
 
-// ExampleTOML returns a commented example config.toml string.
 func ExampleTOML() string {
-	return `# tproxyng config — https://github.com/tproxyng
-# All boolean fields default to false when absent.
+	return `# tproxyng 配置文件
+# 布尔值不填写默认为 false
 
-# Proxy mode: redir | tproxy | mixed | tun
-# redir  → TCP only via NAT redirect (widest kernel compat)
-# tproxy → TCP + UDP via TPROXY (kernel >= 5.2)
-# mixed  → TCP via TPROXY, UDP via TUN
-# tun    → TCP + UDP via TUN
-mode = "tproxy"
-
-# Command to launch the proxy core (required)
+# 代理核心启动命令（必填）
 run = "/usr/bin/sing-box -c /etc/sing-box/config.json"
 
-# Ports
-tproxy_port   = 7893   # tproxy inbound port (required for tproxy/mixed)
-redirect_port = 7892   # redirect inbound port (required for redir)
-dns_port      = 5353   # proxy DNS port (required when hijack_dns = true)
-# tun_name    = "tun0" # TUN interface name (required for tun/mixed)
+# 透明代理模式（必填）
+# redir  → 仅 TCP，NAT redirect，兼容最旧内核
+# tproxy → TCP + UDP，需内核 >= 5.2
+# mixed  → TCP 走 tproxy，UDP 走 TUN
+# tun    → TCP + UDP 全走 TUN
+mode = "tproxy"
 
-# Feature flags
-hijack_dns = true    # redirect :53 → dns_port
-ipv6       = false   # enable IPv6 rules
-lan        = false   # proxy LAN devices (enables ip_forward)
-fakeip     = false   # enable FakeIP bypass
+# ── 端口 ──────────────────────────────────────────────────────
+tproxy_port   = 7893    # tproxy 入站端口（mode = tproxy/mixed 时必填）
+# redirect_port = 7892  # redir 入站端口（mode = redir 时必填）
+# dns_port      = 5353  # 代理 DNS 端口（hijack_dns = true 时必填）
+# tun_name      = "tun0"  # TUN 网卡名（mode = tun/mixed 时必填）
 
-# FakeIP address pools (Singa defaults — change only if your proxy uses different ranges)
+# ── 功能开关 ──────────────────────────────────────────────────
+hijack_dns = false   # 劫持 :53 → dns_port
+ipv6       = false   # 启用 IPv6 规则
+lan        = false   # 代理局域网设备（自动开启 ip_forward）
+fakeip     = false   # FakeIP 模式
+
+# FakeIP 地址池（不填使用 sing-box 默认值）
 # fakeip_v4_range = "198.18.0.0/15"
 # fakeip_v6_range = "fc00::/18"
 
-# Process management
-restart_on_fail = true  # restart proxy on non-zero exit
-max_restarts    = 5     # 0 = unlimited
-keepalive       = true  # restart if process is killed unexpectedly
-watch_interval  = 5     # keepalive poll interval in seconds
+# ── 进程管理 ──────────────────────────────────────────────────
+restart_on_fail = true   # 异常退出时自动重启
+max_restarts    = 5      # 最大重启次数（0 = 不限）
+keepalive       = true   # 进程被意外杀死时自动拉起
+watch_interval  = 5      # 保活探测间隔（秒）
+start_timeout   = 3      # 启动确认等待（秒）：进程启动后等待 N 秒确认没有立即崩溃
 
-# Scheduled restart (cron)
+# ── 资源限制（超限则重启核心，规则/路由不动）─────────────────
+max_memory_mb          = 0     # 内存上限 MB（0 = 不限）
+max_cpu_percent        = 0     # CPU 使用率上限 %（0 = 不限，例如 90.0）
+resource_check_interval = 10   # 资源检查间隔（秒）
+
+# ── 定时重启 ──────────────────────────────────────────────────
 cron_restart = false
-# cron_expr  = "0 3 * * *"  # restart at 03:00 every day
+# cron_expr  = "0 3 * * *"   # 每天凌晨 3 点重启核心（规则保留）
 `
 }
