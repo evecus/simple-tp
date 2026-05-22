@@ -24,11 +24,7 @@ hijack_dns = false   # 劫持 :53 → dns_port
 ipv6       = false   # 启用 IPv6 规则
 lan        = false   # 代理局域网设备（自动开启 ip_forward）
 fakeip     = false   # FakeIP 模式
-
-# 是否代理本机流量（默认 true）
-# 设为 false 后，本机发出的流量不走代理，只代理局域网设备（需 lan = true）
-# 注意：当 proxy_local = false 且 lan = false 时，强制代理本机（避免无规则状态）
-# proxy_local = true
+proxy_local = true  # 是否代理本机流量（默认 true）
 
 # 局域网 IP 过滤（仅 lan = true 时生效）
 # 来自这些源 IP/CIDR 的流量不走代理，空格分隔
