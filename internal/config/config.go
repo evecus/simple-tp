@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 )
@@ -63,6 +64,14 @@ type Config struct {
 	// 这些 GID 的进程流量不走代理，等同于 sprs 组
 	BypassGIDs []uint32 `json:"bypass_gids"`
 
+	// 局域网 IP 过滤（空格分隔，支持 x.x.x.x/前缀 或 x.x.x.x，仅 lan=true 时生效）
+	// 这些 IP/CIDR 的来源流量不走代理（即绕过代理）
+	BypassIPs string `json:"bypass_ip"`
+
+	// 是否代理本机流量（默认 true）
+	// 当 proxy_local=false 且 lan=false 时，强制 proxy_local=true
+	ProxyLocal *bool `json:"proxy_local"`
+
 	// 启动等待
 	StartWaitTime        int      `json:"start_wait_time"`   // 启动后等待 N 秒再配规则/启核心，0=不等
 	WaitProcess          []string `json:"wait_process"`      // 等待这些完整进程名全部出现后再启动
@@ -107,7 +116,45 @@ func (c Config) Filled() Config {
 	if c.ResourceCheckInterval <= 0 {
 		c.ResourceCheckInterval = 10
 	}
+	// proxy_local 默认 true
+	if c.ProxyLocal == nil {
+		t := true
+		c.ProxyLocal = &t
+	}
+	// 当 proxy_local=false 且 lan=false 时，强制 proxy_local=true
+	if !*c.ProxyLocal && !c.LAN {
+		t := true
+		c.ProxyLocal = &t
+	}
 	return c
+}
+
+// ProxyLocalEnabled 返回是否代理本机流量（默认 true）
+func (c Config) ProxyLocalEnabled() bool {
+	if c.ProxyLocal == nil {
+		return true
+	}
+	return *c.ProxyLocal
+}
+
+// ParsedBypassIPs 解析 bypass_ip 字段，返回 *net.IPNet 列表
+func (c Config) ParsedBypassIPs() []*net.IPNet {
+	if c.BypassIPs == "" {
+		return nil
+	}
+	var nets []*net.IPNet
+	for _, raw := range strings.Fields(c.BypassIPs) {
+		cidr := raw
+		if !strings.Contains(cidr, "/") {
+			cidr = cidr + "/32"
+		}
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		nets = append(nets, ipnet)
+	}
+	return nets
 }
 
 func (c Config) Modes() ProxyModes {
@@ -239,6 +286,9 @@ func setField(cfg *Config, key, val string) error {
 	// string array: wait_process = ["sing-box", "mosdns"]
 	case "wait_process":
 		cfg.WaitProcess = parseStringArray(val)
+	// bypass_ip: space-separated IPs/CIDRs as a quoted string
+	case "bypass_ip":
+		cfg.BypassIPs = unquote(val)
 	// ints
 	case "dns_port":                if ierr == nil { cfg.DNSPort = i };               return ierr
 	case "redirect_port":           if ierr == nil { cfg.RedirectPort = i };           return ierr
@@ -266,6 +316,11 @@ func setField(cfg *Config, key, val string) error {
 	case "restart_on_fail": if berr == nil { cfg.RestartOnFail = b }; return berr
 	case "keepalive":      if berr == nil { cfg.Keepalive = b };      return berr
 	case "cron_restart":   if berr == nil { cfg.CronRestart = b };    return berr
+	case "proxy_local":
+		if berr == nil {
+			cfg.ProxyLocal = &b
+		}
+		return berr
 	}
 	return nil
 }
@@ -378,6 +433,16 @@ hijack_dns = false   # 劫持 :53 → dns_port
 ipv6       = false   # 启用 IPv6 规则
 lan        = false   # 代理局域网设备（自动开启 ip_forward）
 fakeip     = false   # FakeIP 模式
+
+# 是否代理本机流量（默认 true）
+# 设为 false 后，本机发出的流量不走代理，只代理局域网设备（需 lan = true）
+# 注意：当 proxy_local = false 且 lan = false 时，强制代理本机
+# proxy_local = true
+
+# 局域网 IP 过滤（仅 lan = true 时生效）
+# 来自这些源 IP/CIDR 的流量不走代理，空格分隔
+# 支持 x.x.x.x/前缀长度 或 x.x.x.x（等同于 /32）
+# bypass_ip = "192.168.1.100 192.168.2.0/24 10.0.0.1"
 
 # FakeIP 地址池（不填使用 sing-box 默认值）
 # fakeip_v4_range = "198.18.0.0/15"

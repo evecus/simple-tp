@@ -56,6 +56,21 @@ func buildTable(cfg *config.Config, modes config.ProxyModes, gid uint32) string 
 		s.WriteString("    set interface6 {\n        type ipv6_addr\n        flags interval\n        auto-merge\n    }\n")
 	}
 
+	// bypass_ip set：仅在 lan=true 时声明（prerouting 里用）
+	if cfg.LAN && cfg.BypassIPs != "" {
+		bypassNets := cfg.ParsedBypassIPs()
+		if len(bypassNets) > 0 {
+			s.WriteString("    set bypass_src {\n        type ipv4_addr\n        flags interval\n        auto-merge\n        elements = {")
+			for i, n := range bypassNets {
+				if i > 0 {
+					s.WriteString(", ")
+				}
+				s.WriteString(n.String())
+			}
+			s.WriteString("}\n    }\n")
+		}
+	}
+
 	if modes.NeedsTProxyInbound() {
 		s.WriteString(`
     chain tp_mark {
@@ -147,6 +162,10 @@ func buildManglePrerouting(cfg *config.Config, modes config.ProxyModes) string {
 		s.WriteString(fmt.Sprintf("        iifname \"lo\" meta mark & %s != %s return\n", tpFwMask, tpFwMark))
 	}
 	if cfg.LAN {
+		// bypass_ip：来自这些源 IP 的流量不走代理
+		if cfg.BypassIPs != "" && len(cfg.ParsedBypassIPs()) > 0 {
+			s.WriteString("        ip saddr @bypass_src return\n")
+		}
 		if cfg.IPv6 {
 			s.WriteString("        meta nfproto { ipv4, ipv6 } meta l4proto { tcp, udp } fib saddr type != local fib daddr type != local jump proxy_rule\n")
 		} else {
@@ -166,6 +185,12 @@ func buildManglePrerouting(cfg *config.Config, modes config.ProxyModes) string {
 func buildMangleOutput(cfg *config.Config, modes config.ProxyModes, gid uint32) string {
 	var s strings.Builder
 	s.WriteString("\n    chain proxy_out {\n")
+	// 若 proxy_local=false，整个 output 链直接 return，本机流量不走代理
+	if !cfg.ProxyLocalEnabled() {
+		s.WriteString("        return\n")
+		s.WriteString("    }\n")
+		return s.String()
+	}
 	s.WriteString(fmt.Sprintf("        %s\n", nftSkgidExpr(gid, cfg.BypassGIDs)))
 	nfproto := "meta nfproto ipv4"
 	if cfg.IPv6 {
@@ -535,9 +560,20 @@ func ApplyIPTables(cfg *config.Config, gid uint32) error {
 			"iptables -t nat -A SPRS_REDIR -d 172.16.0.0/12 -j RETURN",
 			"iptables -t nat -A SPRS_REDIR -d 192.168.0.0/16 -j RETURN",
 			fmt.Sprintf("iptables -t nat -A SPRS_REDIR -p tcp -j REDIRECT --to-port %d", cfg.RedirectPort),
-			"iptables -t nat -A OUTPUT -p tcp -j SPRS_REDIR",
-			"iptables -t nat -A PREROUTING -p tcp -j SPRS_REDIR",
 		)
+		// proxy_local=false：不对 OUTPUT 挂钩（本机流量不走代理）
+		if cfg.ProxyLocalEnabled() {
+			cmds = append(cmds, "iptables -t nat -A OUTPUT -p tcp -j SPRS_REDIR")
+		}
+		// lan=true 时才挂 PREROUTING；bypass_ip 在 PREROUTING 前插入 RETURN 规则
+		if cfg.LAN {
+			if cfg.BypassIPs != "" {
+				for _, n := range cfg.ParsedBypassIPs() {
+					cmds = append(cmds, fmt.Sprintf("iptables -t nat -I SPRS_REDIR 1 -s %s -j RETURN", n.String()))
+				}
+			}
+			cmds = append(cmds, "iptables -t nat -A PREROUTING -p tcp -j SPRS_REDIR")
+		}
 		for _, c := range cmds {
 			if err := runCmd(c); err != nil {
 				log.Printf("firewall(iptables): %v", err)
